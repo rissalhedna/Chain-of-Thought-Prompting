@@ -14,17 +14,19 @@ def callGPT(
     temperature: float = 0.2,
     client: OpenAI = OpenAI(),
 ):
-
-    answer = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": systemPrompt},
-            {"role": "user", "content": question},
-        ],
-        temperature=temperature,
-    )
-
-    return answer.choices[0].message.content
+    try:
+        answer = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": systemPrompt},
+                {"role": "user", "content": question},
+            ],
+            temperature=temperature,
+        )
+        return answer.choices[0].message.content
+    except Exception as e:
+        print(f"Error in GPT call: {e}")
+        return None
 
 
 def create_word_embedding(

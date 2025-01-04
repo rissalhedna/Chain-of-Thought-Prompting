@@ -3,13 +3,16 @@ import datetime
 import json
 from pathlib import Path
 from collections import defaultdict
-from typing import Any, Callable
+from typing import Any, Callable, List, Dict
 import pandas as pd
 import numpy as np
 from sklearn.cluster import KMeans
 from scipy.spatial.distance import euclidean
 from tqdm import tqdm
 from src.gpt_utils import callGPT, create_word_embedding
+import networkx as nx
+from collections import Counter
+import textwrap
 
 
 MATH_SYSTEM_PROMPT = """
@@ -109,7 +112,7 @@ def get_choices_str(example):
 
 
 def process_example(args: tuple) -> dict[str, Any]:
-    example, system_prompt, question_functions, dataset_name = args
+    example, system_prompt, question_functions, dataset_name, visualize = args
     question = example["question"].strip()
 
     if dataset_name == "tau/commonsense_qa":
@@ -129,7 +132,28 @@ def process_example(args: tuple) -> dict[str, Any]:
     for question_name, question_func in question_functions.items():
         try:
             transformer_question = question_func(question)
-            model_output = callGPT(system_prompt, transformer_question)
+
+            # Special handling for TreeReasoning with visualization
+            if question_name == "TreeReasoning" and visualize:
+                responses = []
+                temperatures = [0.2, 0.4, 0.6, 0.8, 1.0]
+                formatted_question = getTreeReasoningQuestion(question)
+
+                for temp in temperatures:
+                    response = callGPT(
+                        system_prompt, formatted_question, temperature=temp
+                    )
+                    responses.append(response)
+
+                tree = build_reasoning_tree(
+                    responses,
+                    question=question,
+                    save_path=f"reasoning_trees/{dataset_name}",
+                    visualize=True,  # Enable visualization for this sample
+                )
+                model_output = get_majority_answer(tree)
+            else:
+                model_output = callGPT(system_prompt, transformer_question)
 
             model_answer_raw = extract_answer(model_output)
             model_answer = clean_answer(model_answer_raw)
@@ -140,10 +164,7 @@ def process_example(args: tuple) -> dict[str, Any]:
                 "extracted_answer": model_answer_raw,
                 "is_correct": model_answer == true_answer,
             }
-            if dataset_name == "openai/gsm8k":
-                example_results["question_results"][question_name]["is_correct"] = (
-                    float(model_answer) == float(true_answer)
-                )
+
         except Exception as e:
             example_results["question_results"][question_name] = {"error": str(e)}
 
@@ -156,6 +177,7 @@ def evaluate_questions(
     dataset_name: str,
     question_functions: dict[str, Callable[[str], str]],
     max_workers: int = 5,
+    visualize_sample: int = 0,
 ) -> dict[str, float]:
     metrics = defaultdict(lambda: {"correct": 0, "total": 0})
     all_results = {
@@ -167,8 +189,8 @@ def evaluate_questions(
     }
 
     process_args = [
-        (row, system_prompt, question_functions, dataset_name)
-        for _, row in dataset.iterrows()
+        (row, system_prompt, question_functions, dataset_name, idx == visualize_sample)
+        for idx, row in dataset.iterrows()
     ]
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -208,3 +230,129 @@ def evaluate_questions(
 
     print(f"Results saved to: {output_path}")
     return accuracy_results
+
+
+def getTreeReasoningQuestion(question: str) -> str:
+    """Prepare question for tree-based reasoning approach."""
+    return (
+        "Let's solve this step by step:\n"
+        "1. Break down the question\n"
+        "2. Consider each option carefully\n"
+        "3. Provide your reasoning\n"
+        "4. Choose the best answer\n\n"
+        "For each step, start your line with 'Step: '\n"
+        "End with your final answer after '####'\n\n"
+        f"Question: {question}"
+    )
+
+
+def parse_reasoning_steps(response: str) -> List[str]:
+    """Parse the response into individual reasoning steps."""
+    steps = []
+    for line in response.split("\n"):
+        if line.strip().startswith("Step:"):
+            steps.append(line.strip()[6:].strip())
+    return steps
+
+
+def build_reasoning_tree(
+    responses: List[str],
+    question: str = None,
+    save_path: str = "reasoning_trees",
+    visualize: bool = False,
+) -> nx.DiGraph:
+    """Build and optionally visualize a directed graph representing reasoning paths."""
+    G = nx.DiGraph()
+    G.add_node("root", content=question or "Question")
+
+    # Create the tree structure
+    for i, response in enumerate(responses):
+        steps = parse_reasoning_steps(response)
+        prev_node = "root"
+        for j, step in enumerate(steps):
+            node_id = f"path{i}_step{j}"
+            G.add_node(node_id, content=step)
+            G.add_edge(prev_node, node_id)
+            prev_node = node_id
+
+        # Add final answer as leaf
+        answer = extract_answer(response)
+        leaf_id = f"path{i}_answer"
+        G.add_node(leaf_id, content=f"Answer: {answer}", is_answer=True)
+        G.add_edge(prev_node, leaf_id)
+
+    if visualize:
+        try:
+            import graphviz
+
+            # Create Graphviz object
+            dot = graphviz.Digraph(
+                comment="Reasoning Tree",
+                graph_attr={
+                    "rankdir": "TB",  # Top to Bottom layout
+                    "splines": "ortho",  # Orthogonal lines
+                    "nodesep": "0.5",  # Vertical space between nodes
+                    "ranksep": "1.0",  # Horizontal space between ranks
+                    "fontname": "Arial",
+                    "bgcolor": "white",
+                },
+                node_attr={
+                    "shape": "box",
+                    "style": "rounded,filled",
+                    "fontname": "Arial",
+                    "margin": "0.3,0.1",
+                    "width": "0",  # Auto-width based on text
+                    "height": "0",  # Auto-height based on text
+                },
+                edge_attr={"fontname": "Arial", "fontsize": "10"},
+            )
+
+            # Add nodes with proper formatting
+            for node in G.nodes():
+                content = G.nodes[node]["content"]
+
+                # Format label with line breaks every ~50 characters
+                formatted_content = "\n".join(
+                    textwrap.fill(content, width=50).split("\n")
+                )
+
+                if node == "root":
+                    dot.node(
+                        node, formatted_content, fillcolor="lightgreen", shape="box"
+                    )
+                elif G.nodes[node].get("is_answer", False):
+                    dot.node(
+                        node, formatted_content, fillcolor="lightpink", shape="diamond"
+                    )
+                else:
+                    dot.node(node, formatted_content, fillcolor="lightblue")
+
+            # Add edges
+            for edge in G.edges():
+                dot.edge(edge[0], edge[1])
+
+            # Save the visualization
+            save_dir = Path(save_path)
+            save_dir.mkdir(exist_ok=True, parents=True)
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = save_dir / f"reasoning_tree_{timestamp}"
+
+            # Render both PDF and PNG versions
+            dot.render(str(output_path), format="png", cleanup=True)
+
+            print(f"Tree visualization saved to: {output_path}.png")
+        except (ImportError, RuntimeError) as e:
+            print(f"Warning: Visualization failed - {str(e)}")
+            print("Continuing without visualization...")
+
+    return G
+
+
+def get_majority_answer(tree: nx.DiGraph) -> str:
+    """Get the most common answer from leaf nodes."""
+    answers = [
+        data["content"]
+        for _, data in tree.nodes(data=True)
+        if data.get("is_answer", False)
+    ]
+    return Counter(answers).most_common(1)[0][0]
