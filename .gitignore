@@ -180,5 +180,5 @@ get-pip.py
 
 batch_files/
 output_files/
-reasoning_trees/
-original_batches/
+reasoning_trees/*
+original_batches/*
