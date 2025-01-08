@@ -4,6 +4,7 @@ import matplotlib
 
 rootutils.setup_root(__file__, indicator=".project_root", pythonpath=True)
 
+from src.batch_processing import BatchProcessor
 from src.gpt_utils import callGPT
 from src.data_utils import CoTDataModule
 from src.prompt_utils import (
@@ -18,6 +19,7 @@ from src.prompt_utils import (
     build_reasoning_tree,
     get_majority_answer,
 )
+from src.batch_preparation import create_batches
 
 
 def evaluate_dataset(
@@ -64,7 +66,9 @@ def evaluate_dataset(
     question_list = dataset["question"][:first_k_samples]
 
     auto_cot_demonstrations = generate_auto_cot_demonstrations(
-        question_list, n_clusters=int(math.sqrt(first_k_samples) / 2)
+        question_list,
+        n_clusters=int(math.sqrt(first_k_samples) / 2),
+        # n_clusters=2,
     )
 
     evaluate_questions(
@@ -77,11 +81,43 @@ def evaluate_dataset(
     )
 
 
-evaluate_dataset(
-    dataset_name="tau/commonsense_qa",
-    system_prompt=COMMONSENSE_SYSTEM_PROMPT,
-    first_k_samples=5,
-    visualize_sample=4,
-)
+def process_dataset_in_batches(
+    dataset_name: str, first_k_samples: int, batch_size: int = 100
+):
+    dataset = CoTDataModule(dataset_name).data[:first_k_samples]
+
+    auto_cot_demonstrations = generate_auto_cot_demonstrations(
+        dataset["question"], n_clusters=int(math.sqrt(first_k_samples) / 2)
+    )
+
+    create_batches(
+        dataset=dataset,
+        batch_size=batch_size,
+        dataset_name=dataset_name,
+        auto_cot_demonstrations=auto_cot_demonstrations,
+    )
+
+
+# evaluate_dataset(
+#     dataset_name="openai/gsm8k",
+#     system_prompt=MATH_SYSTEM_PROMPT,
+#     first_k_samples=10,
+#     visualize_sample=4,
+# )
+
+# evaluate_dataset(
+#     dataset_name="tau/commonsense_qa",
+#     system_prompt=COMMONSENSE_SYSTEM_PROMPT,
+#     first_k_samples=10,
+#     visualize_sample=4,
+# )
 
 # evaluate_dataset("tau/commonsense_qa", COMMONSENSE_SYSTEM_PROMPT, 1000)
+
+process_dataset_in_batches(
+    dataset_name="openai/gsm8k", first_k_samples=10, batch_size=2
+)
+
+
+# processor = BatchProcessor()
+# processor.process_all_batches()

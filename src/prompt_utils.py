@@ -79,14 +79,18 @@ def getAutoCotQuestion(
     dataset: pd.DataFrame,
     dataset_name: str,
 ):
-    question += "Here are some examples of how to answer the question:\n"
+    prompt = "Here are some examples of similar problems and their solutions:\n\n"
+
     for i, (idx, demonstration) in enumerate(demonstrations):
-        question += f"Example {i+1}: {demonstration}\n."
+        prompt += f"Example {i+1}: {demonstration}\n"
         if dataset_name == "tau/commonsense_qa":
-            question += f" Choices: {get_choices_str(dataset.iloc[idx])}. "
-        question += f"Answer: {dataset.loc[idx, 'answer']}\n\n"
-    question += "Now, let's think step by step."
-    return question
+            prompt += f"Choices: {get_choices_str(dataset.iloc[idx])}. "
+        prompt += f"Answer: {dataset.loc[idx, 'answer']}\n\n"
+
+    prompt += (
+        f"Now, please solve this question:\n{question}\n\nLet's think step by step."
+    )
+    return prompt
 
 
 metrics = defaultdict(lambda: {"correct": 0, "total": 0})
@@ -95,13 +99,36 @@ metrics = defaultdict(lambda: {"correct": 0, "total": 0})
 def extract_answer(text: str):
     delimiter = "####"
     if delimiter in text:
-        return text.split(delimiter)[-1].strip() if delimiter in text else ""
+        answer_part = text.split(delimiter)[-1].strip()
 
-    return text[-1].upper()
+        if answer_part.lower().startswith("answer:"):
+            answer_part = answer_part[7:].strip()
+
+        return answer_part
+
+    if text.lower().startswith("answer:"):
+        return text[7:].strip()
+
+    # Return the whole text as a fallback
+    return text.strip()
 
 
-def clean_answer(answer):
-    return answer.strip().lower()
+def clean_answer(answer: str):
+    """Clean and normalize answers for comparison.
+    Handles both single-letter answers and numeric values."""
+    answer = answer.strip()
+
+    # If it's a single character, return it uppercase
+    if len(answer) == 1:
+        return answer.upper()
+
+    try:
+        # Try to convert to float and then back to string to normalize numeric values
+        # This handles cases like "990.00" vs "990"
+        return str(int(float(answer)))
+    except ValueError:
+        # If not numeric, return as-is
+        return answer.lower()
 
 
 def get_choices_str(example):
@@ -125,7 +152,7 @@ def process_example(args: tuple) -> dict[str, Any]:
 
     example_results = {
         "question": question,
-        "true_answer": true_answer_raw,
+        "true_answer": true_answer,
         "question_results": {},
     }
 
@@ -161,7 +188,7 @@ def process_example(args: tuple) -> dict[str, Any]:
             example_results["question_results"][question_name] = {
                 "question": transformer_question,
                 "model_output": model_output,
-                "extracted_answer": model_answer_raw,
+                "extracted_answer": model_answer,
                 "is_correct": model_answer == true_answer,
             }
 
@@ -234,6 +261,10 @@ def evaluate_questions(
 
 def getTreeReasoningQuestion(question: str) -> str:
     """Prepare question for tree-based reasoning approach."""
+    # Clean the question by removing any "Answer:" prefix
+    if question.lower().startswith("answer:"):
+        question = question[7:].strip()
+
     return (
         "Let's solve this step by step:\n"
         "1. Break down the question\n"
@@ -275,7 +306,6 @@ def build_reasoning_tree(
             G.add_edge(prev_node, node_id)
             prev_node = node_id
 
-        # Add final answer as leaf
         answer = extract_answer(response)
         leaf_id = f"path{i}_answer"
         G.add_node(leaf_id, content=f"Answer: {answer}", is_answer=True)
@@ -285,7 +315,6 @@ def build_reasoning_tree(
         try:
             import graphviz
 
-            # Create Graphviz object
             dot = graphviz.Digraph(
                 comment="Reasoning Tree",
                 graph_attr={
@@ -327,17 +356,14 @@ def build_reasoning_tree(
                 else:
                     dot.node(node, formatted_content, fillcolor="lightblue")
 
-            # Add edges
             for edge in G.edges():
                 dot.edge(edge[0], edge[1])
 
-            # Save the visualization
             save_dir = Path(save_path)
             save_dir.mkdir(exist_ok=True, parents=True)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             output_path = save_dir / f"reasoning_tree_{timestamp}"
 
-            # Render both PDF and PNG versions
             dot.render(str(output_path), format="png", cleanup=True)
 
             print(f"Tree visualization saved to: {output_path}.png")
